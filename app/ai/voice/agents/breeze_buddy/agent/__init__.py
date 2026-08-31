@@ -1,96 +1,33 @@
 """Voice agent for handling conversations via Daily or telephony transports."""
 
+from __future__ import annotations
+
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 from fastapi import WebSocket
 from opentelemetry import trace
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMMessagesAppendFrame, TTSSpeakFrame
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineTask
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 from pipecat.runner.types import RunnerArguments
-from pipecat.runner.utils import (
-    _create_telephony_transport,
-    create_transport,
-    parse_telephony_websocket,
-)
-from pipecat_flows import FlowManager
 
-from app.ai.voice.agents.breeze_buddy.agent.approval import (
-    RTVI_APPROVAL_DECISION,
-    RTVI_APPROVAL_REQUEST,
-    ApprovalManager,
-)
-from app.ai.voice.agents.breeze_buddy.agent.flow import (
-    build_flow_config,
-    load_template_config,
-    prepare_initial_node,
-    setup_flow_manager,
-)
-from app.ai.voice.agents.breeze_buddy.agent.inbound import (
-    create_lead_from_template_id,
-    handle_inbound_call,
-)
 from app.ai.voice.agents.breeze_buddy.agent.pipeline import (
     build_pipeline,
     create_pipeline_task,
     create_services,
     generate_conversation_id,
 )
-from app.ai.voice.agents.breeze_buddy.agent.transfer import apply_transfer
-from app.ai.voice.agents.breeze_buddy.agent.transport import (
-    TRANSPORT_TYPE_DAILY,
-    get_transport_params,
-)
 from app.ai.voice.agents.breeze_buddy.agent.utils import (
     end_call_with_errors,
     send_initial_greeting,
     send_initial_greeting_daily,
 )
-from app.ai.voice.agents.breeze_buddy.chat.voice_bridge import WidgetVoiceBridge
-from app.ai.voice.agents.breeze_buddy.handlers.internal.end_conversation import (
-    end_conversation,
-)
-from app.ai.voice.agents.breeze_buddy.ivr.selection import (
-    BLOCK_MESSAGE_PLAY_SECONDS,
-    _send_audio,
-    get_template_id_from_call,
-    prepare_block_audio,
-)
-from app.ai.voice.agents.breeze_buddy.ivr.walker import IvrWalker
-from app.ai.voice.agents.breeze_buddy.managers.utils import (
-    prepare_and_store_initial_greeting,
-)
-from app.ai.voice.agents.breeze_buddy.mcp import get_mcp_global_functions
-from app.ai.voice.agents.breeze_buddy.observability.tracing_setup import (
-    create_root_span,
-)
-from app.ai.voice.agents.breeze_buddy.observers import ObserverManager, build_observers
-from app.ai.voice.agents.breeze_buddy.processors import (
-    KnowledgeRetrievalProcessor,
-    MetricsCollectorProcessor,
-    TranscriptCollectorProcessor,
-)
-from app.ai.voice.agents.breeze_buddy.processors.voice_ui_stream import (
-    coerce_ui_action_text,
-)
-from app.ai.voice.agents.breeze_buddy.services.inbound_policy import (
-    get_block_redirect,
-)
-from app.ai.voice.agents.breeze_buddy.services.knowledge_base import (
-    fetch_full_kb_text_cached,
-    resolve_kb_runtime,
+from app.ai.voice.agents.breeze_buddy.services.daily.startup_timer import (
+    DailyStartupTimer,
 )
 from app.ai.voice.agents.breeze_buddy.services.telephony.base_provider import (
     VoiceCallProvider,
 )
-from app.ai.voice.agents.breeze_buddy.template.builder import FlowConfigBuilder
 from app.ai.voice.agents.breeze_buddy.template.context import (
     TemplateContext,
     with_context,
@@ -123,7 +60,6 @@ from app.ai.voice.agents.breeze_buddy.utils.transport.websockets import (
     close_websocket_safely,
 )
 from app.ai.voice.agents.breeze_buddy.utils.warm_transfer import set_transfer_flag
-from app.ai.voice.llm.realtime.gemini.realtime import has_realtime_llm
 from app.core.config.dynamic import BB_DAILY_AUDIO_OUT_10MS_CHUNKS
 from app.core.config.static import ENABLE_BREEZE_BUDDY_TRACING
 from app.core.logger import logger
@@ -138,10 +74,27 @@ from app.database.accessor.breeze_buddy.lead_call_tracker import (
     update_lead_template,
 )
 from app.database.accessor.breeze_buddy.template import get_template_by_id
-from app.schemas import CallProvider
-from app.schemas.breeze_buddy.core import ExecutionMode, LeadCallTracker
+from app.schemas.breeze_buddy.core import CallProvider, ExecutionMode, LeadCallTracker
+
+if TYPE_CHECKING:
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+    from pipecat.pipeline.runner import PipelineRunner
+    from pipecat.pipeline.task import PipelineTask
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat_flows import FlowManager
+    from app.ai.voice.agents.breeze_buddy.agent.approval import ApprovalManager
+    from app.ai.voice.agents.breeze_buddy.chat.voice_bridge import WidgetVoiceBridge
+    from app.ai.voice.agents.breeze_buddy.processors.metrics_collector_processor import (
+        MetricsCollectorProcessor,
+    )
+    from app.ai.voice.agents.breeze_buddy.observers import ObserverManager
+    from app.ai.voice.agents.breeze_buddy.processors.transcript_collector import (
+        TranscriptCollectorProcessor,
+    )
 
 DEFAULT_OUTCOME = "BUSY"
+TRANSPORT_TYPE_DAILY = "daily"
 TTS_SPEAK_MAX_CHARS = 2000
 # Cap on a carousel/product-click `ui-action` message injected as a user turn
 # (mirrors TTS_SPEAK_MAX_CHARS). See docs/widget/VOICE_AS_CHAT.md (A2).
@@ -299,6 +252,8 @@ class Agent:
         if not self._rtvi_processor:
             return
         try:
+            from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+
             data: Dict[str, Any] = {
                 "type": event_type,
                 "timestamp": int(time.time() * 1000),
@@ -346,6 +301,10 @@ class Agent:
             f"(retries: {idle_retry_count})"
         )
 
+        from app.ai.voice.agents.breeze_buddy.handlers.internal.end_conversation import (
+            end_conversation,
+        )
+
         context = TemplateContext(self)
         await end_conversation(context, {})
 
@@ -362,6 +321,8 @@ class Agent:
 
             # If user never spoke, trigger first idle prompt
             if not self._user_spoke and self.task:
+                from pipecat.frames.frames import LLMMessagesAppendFrame
+
                 logger.info("Post-greeting idle detected. Triggering first prompt.")
                 await self.task.queue_frames(
                     [
@@ -388,6 +349,10 @@ class Agent:
         """Initialize transport for Daily mode."""
         if not runner_args or not runner_args.body:
             raise ValueError("runner_args with body is required for Daily mode")
+        timer = DailyStartupTimer.from_runner_body(
+            runner_args.body, component="agent_daily_setup"
+        )
+        timer.mark("begin")
 
         lead_id = runner_args.body.get("lead_id")
         if not lead_id:
@@ -400,6 +365,7 @@ class Agent:
         self.lead = await update_lead_call_initiated_time_by_id(
             lead_id, call_initiated_time
         )
+        timer.mark("lead_loaded")
         if not self.lead:
             raise ValueError(f"Lead not found for lead_id: {lead_id}")
 
@@ -415,18 +381,28 @@ class Agent:
 
         # Stream mode skips flow builder — no LLM/template nodes needed
         if not self.is_stream_mode:
+            from app.ai.voice.agents.breeze_buddy.template.builder import (
+                FlowConfigBuilder,
+            )
+
             self.flow_builder = FlowConfigBuilder()
             for handler_name, handler_func in self.flow_builder.handler_map.items():
                 self.flow_builder.handler_map[handler_name] = with_context(self)(
                     handler_func
                 )
+            timer.mark("flow_builder_created")
+        else:
+            timer.mark("flow_builder_skipped_stream")
 
         try:
+            from app.ai.voice.agents.breeze_buddy.agent.flow import load_template_config
+
             (
                 self.template,
                 self.configurations,
                 self.template_vars,
             ) = await load_template_config(self.lead)
+            timer.mark("template_config_loaded")
         except ValueError as e:
             logger.error(f"Failed to load template config for Daily mode: {e}")
             raise
@@ -440,6 +416,10 @@ class Agent:
         # LLM/template playback in passthrough mode.
         if not self.is_stream_mode:
             try:
+                from app.ai.voice.agents.breeze_buddy.managers.utils import (
+                    prepare_and_store_initial_greeting,
+                )
+
                 await asyncio.wait_for(
                     prepare_and_store_initial_greeting(
                         lead_id=self.lead.id,
@@ -458,10 +438,18 @@ class Agent:
                     f"Daily greeting synthesis failed for lead {self.lead.id}: {e}; "
                     "client will hear no greeting (LLM may speak first instead)"
                 )
+            timer.mark("initial_greeting_prepared")
+        else:
+            timer.mark("initial_greeting_skipped_stream")
 
         self.vad_analyzer, self.default_vad_params = await create_vad_analyzer(
             is_daily_mode=True,
             template=self.template,
+        )
+        timer.mark("vad_created", enabled=bool(self.vad_analyzer))
+
+        from app.ai.voice.agents.breeze_buddy.agent.transport import (
+            get_transport_params,
         )
 
         transport_params = get_transport_params(
@@ -469,7 +457,11 @@ class Agent:
             self.configurations,
             daily_audio_out_10ms_chunks=await BB_DAILY_AUDIO_OUT_10MS_CHUNKS(),
         )
+        timer.mark("transport_params_created")
+        from pipecat.runner.utils import create_transport
+
         self.transport = await create_transport(runner_args, transport_params)
+        timer.mark("transport_created")
 
         # Keep-alive: preserve the joined DailyTransportClient across pipeline
         # generations so an agent-transfer rebuild never leaves the room / ejects
@@ -479,6 +471,7 @@ class Agent:
         daily_transport: Any = self.transport
         self._daily_client = daily_transport._client
         self._daily_restore = hold_daily_client(self._daily_client)
+        timer.mark("daily_client_held")
 
     async def _setup_telephony_transport(self) -> bool:
         """Initialize transport for telephony mode. Returns False if setup fails."""
@@ -490,6 +483,8 @@ class Agent:
         call_initiated_time = datetime.now(timezone.utc)
 
         # Parse WebSocket messages to get transport type and call data
+        from pipecat.runner.utils import parse_telephony_websocket
+
         transport_type, call_data = await parse_telephony_websocket(self.ws)
 
         self.call_sid = call_data.get("call_id")
@@ -526,6 +521,14 @@ class Agent:
 
         if not self.lead:
             # Inbound call - extract template_id (handles IVR mode if enabled)
+            from app.ai.voice.agents.breeze_buddy.agent.inbound import (
+                create_lead_from_template_id,
+                handle_inbound_call,
+            )
+            from app.ai.voice.agents.breeze_buddy.ivr.selection import (
+                get_template_id_from_call,
+            )
+
             (
                 template_id_from_query,
                 error_reason,
@@ -593,6 +596,10 @@ class Agent:
             # the lead if a different template was chosen.
             ivr_mode = url_query_params.get("ivr_mode") == "true"
             if ivr_mode:
+                from app.ai.voice.agents.breeze_buddy.ivr.selection import (
+                    get_template_id_from_call,
+                )
+
                 (
                     template_id_from_query,
                     error_reason,
@@ -632,6 +639,8 @@ class Agent:
         update_log_context(lead_id=str(self.lead.id))
 
         try:
+            from app.ai.voice.agents.breeze_buddy.agent.flow import load_template_config
+
             (
                 self.template,
                 self.configurations,
@@ -670,6 +679,8 @@ class Agent:
             clear_log_context()
             return False
 
+        from app.ai.voice.agents.breeze_buddy.template.builder import FlowConfigBuilder
+
         self.flow_builder = FlowConfigBuilder()
         for handler_name, handler_func in self.flow_builder.handler_map.items():
             self.flow_builder.handler_map[handler_name] = with_context(self)(
@@ -691,6 +702,10 @@ class Agent:
         # and the customer would hear dead air. On timeout/error, fall through
         # to send_initial_greeting which plays the dial-tone fallback.
         try:
+            from app.ai.voice.agents.breeze_buddy.managers.utils import (
+                prepare_and_store_initial_greeting,
+            )
+
             await asyncio.wait_for(
                 prepare_and_store_initial_greeting(
                     lead_id=self.lead.id,
@@ -725,6 +740,8 @@ class Agent:
         # UserIdleController. Their user-turn events can arrive after speech
         # begins, so this separate wall-clock timer could expire mid-response
         # and trigger a false idle recovery or reconnect.
+        from app.ai.voice.llm.realtime.gemini.realtime import has_realtime_llm
+
         if (
             self.greeting_source
             and self.configurations
@@ -744,6 +761,10 @@ class Agent:
         )
 
         # Get transport params using the detected transport type
+        from app.ai.voice.agents.breeze_buddy.agent.transport import (
+            get_transport_params,
+        )
+
         transport_params = get_transport_params(self.template, self.configurations)
         params = transport_params[transport_type]()
 
@@ -758,6 +779,8 @@ class Agent:
 
         # Create transport with the call data. Cast: the proxy forwards every
         # attribute so it quacks like a WebSocket, but isn't a subclass.
+        from pipecat.runner.utils import _create_telephony_transport
+
         self.transport = await _create_telephony_transport(
             cast(WebSocket, self._rebuild.ws_proxy), params, transport_type, call_data
         )
@@ -779,6 +802,10 @@ class Agent:
         if not self.call_sid:
             return False
 
+        from app.ai.voice.agents.breeze_buddy.services.inbound_policy import (
+            get_block_redirect,
+        )
+
         redirect_info = await get_block_redirect(self.call_sid)
         if not redirect_info:
             return False
@@ -795,6 +822,12 @@ class Agent:
         # Play block message if available (with caching)
         if block_message and self.ws and self.stream_sid:
             try:
+                from app.ai.voice.agents.breeze_buddy.ivr.selection import (
+                    BLOCK_MESSAGE_PLAY_SECONDS,
+                    _send_audio,
+                    prepare_block_audio,
+                )
+
                 audio = await prepare_block_audio(block_message, self.provider or "")
                 if audio:
                     await _send_audio(
@@ -883,9 +916,15 @@ class Agent:
         # daily AGENT mode (is_stream_mode=False), so registering only in
         # stream mode would make approval decisions undeliverable there.
         if self._rtvi_processor:
+            from app.ai.voice.agents.breeze_buddy.agent.approval import (
+                RTVI_APPROVAL_DECISION,
+                RTVI_APPROVAL_REQUEST,
+            )
 
             @self._rtvi_processor.event_handler("on_client_ready")
             async def on_client_ready(rtvi):
+                from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
+
                 await rtvi.push_frame(
                     RTVIServerMessageFrame(data={"type": "bot-ready"})
                 )
@@ -900,6 +939,8 @@ class Agent:
             async def on_client_message(rtvi, message):
                 # tts-speak remains stream-mode-only (PipecatClient SDK).
                 if message.type == "tts-speak" and self.is_stream_mode:
+                    from pipecat.frames.frames import TTSSpeakFrame
+
                     data = message.data or {}
                     text = data.get("text", "")
                     if not isinstance(text, str) or not text:
@@ -945,6 +986,10 @@ class Agent:
                     # a user turn. The backend emits no transcript echo (the
                     # widget renders the bubble optimistically). See
                     # docs/widget/VOICE_AS_CHAT.md (A2).
+                    from app.ai.voice.agents.breeze_buddy.processors.voice_ui_stream import (
+                        coerce_ui_action_text,
+                    )
+
                     text = coerce_ui_action_text(message.data, UI_ACTION_MAX_CHARS)
                     if text is None:
                         logger.warning(f"[ui-action] empty/malformed: {message.data!r}")
@@ -955,6 +1000,8 @@ class Agent:
                         logger.debug(f"[ui-action] bridge user turn: {text[:80]}")
                         await self._voice_bridge.handle_user_turn(text)
                     elif self.task:
+                        from pipecat.frames.frames import LLMMessagesAppendFrame
+
                         # Agent mode: inject into the live LLM context
                         # (run_llm=True) — the same mid-call user-turn injection
                         # user_idle.py uses; pipecat handles barge-in natively.
@@ -998,6 +1045,10 @@ class Agent:
             (self.lead.metaData or {}).get("widget_session_id") if self.lead else None
         )
         if self.is_stream_mode and widget_session_id and self._context_aggregator:
+            from app.ai.voice.agents.breeze_buddy.chat.voice_bridge import (
+                WidgetVoiceBridge,
+            )
+
             self._voice_bridge = WidgetVoiceBridge(
                 session_id=str(widget_session_id),
                 task=self.task,
@@ -1118,6 +1169,8 @@ class Agent:
             # Mirror the telephony fallback for non-realtime pipelines.
             # Realtime LLMs rely on server-side turn detection and the
             # UserIdleController to avoid the timer race described above.
+            from app.ai.voice.llm.realtime.gemini.realtime import has_realtime_llm
+
             if (
                 self.greeting_source
                 and self.configurations
@@ -1130,6 +1183,8 @@ class Agent:
                     self._post_greeting_task = asyncio.create_task(
                         self._handle_post_greeting_idle(user_idle_config)
                     )
+
+        from app.ai.voice.agents.breeze_buddy.agent.flow import build_flow_config
 
         (
             self.flow_config,
@@ -1150,6 +1205,8 @@ class Agent:
                 )
             except Exception as e:
                 logger.warning(f"KB full-injection text unavailable at connect: {e}")
+
+        from app.ai.voice.agents.breeze_buddy.agent.flow import prepare_initial_node
 
         initial_node_config = prepare_initial_node(
             flow_config=self.flow_config,
@@ -1198,6 +1255,10 @@ class Agent:
         if not self.lead or not self.task:
             logger.error("Lead or task not initialized for tracing")
             return
+
+        from app.ai.voice.agents.breeze_buddy.observability.tracing_setup import (
+            create_root_span,
+        )
 
         lead_payload = self.lead.payload or {}
         self.root_span = create_root_span(
@@ -1323,6 +1384,8 @@ class Agent:
                     f"[IVR] flow.mode=ivr -> running DTMF walker for "
                     f"call {self.call_sid}"
                 )
+                from app.ai.voice.agents.breeze_buddy.ivr.walker import IvrWalker
+
                 await IvrWalker(self).run()
                 return
 
@@ -1335,6 +1398,10 @@ class Agent:
                     break
                 transfer = self.pending_transfer
                 self.pending_transfer = None
+                from app.ai.voice.agents.breeze_buddy.agent.transfer import (
+                    apply_transfer,
+                )
+
                 await apply_transfer(self, transfer)
 
             # The Agent owns the ONE real teardown at true call end — per-generation
@@ -1363,9 +1430,23 @@ class Agent:
         # mode="stream" (no LLM processor, no assistant aggregator, transcript
         # collector inserted, no user idle). All other wiring is identical.
         is_stream = self.is_stream_mode
+        timer = None
+        if self.is_daily_mode:
+            body = self._rebuild.runner_args.body if self._rebuild.runner_args else {}
+            timer = DailyStartupTimer.from_runner_body(
+                body or {}, component="agent_generation"
+            )
+            timer.mark("begin", generation=self.generation, stream=is_stream)
         stt, llm, tts = await create_services(
             self.configurations, include_llm=not is_stream
         )
+        if timer:
+            timer.mark(
+                "services_created",
+                stt=type(stt).__name__ if stt is not None else "none",
+                llm=type(llm).__name__ if llm is not None else "none",
+                tts=type(tts).__name__ if tts is not None else "none",
+            )
         if not is_stream:
             assert llm is not None, "LLM is required in agent mode"
 
@@ -1386,9 +1467,18 @@ class Agent:
         self._kb_text_task = None
         is_realtime_llm = stt is None and tts is None and llm is not None
         if not is_stream:
+            from app.ai.voice.agents.breeze_buddy.services.knowledge_base import (
+                fetch_full_kb_text_cached,
+                resolve_kb_runtime,
+            )
+
             self.kb_runtime = await resolve_kb_runtime(self.configurations)
         if self.kb_runtime:
             if self.kb_runtime.mode == "auto_retrieve" and not is_realtime_llm:
+                from app.ai.voice.agents.breeze_buddy.processors.knowledge_retrieval import (
+                    KnowledgeRetrievalProcessor,
+                )
+
                 self._kb_processor = KnowledgeRetrievalProcessor(self.kb_runtime.config)
                 logger.info("KB auto_retrieve enabled for this call")
             elif self.kb_runtime.mode == "full_injection":
@@ -1398,6 +1488,16 @@ class Agent:
                     fetch_full_kb_text_cached(self.kb_runtime.config)
                 )
                 logger.info("KB full_injection enabled for this call")
+        if timer:
+            kb_mode = (
+                getattr(self.kb_runtime, "mode", "none")
+                if self.kb_runtime
+                else "none"
+            )
+            timer.mark(
+                "kb_resolved",
+                mode=kb_mode,
+            )
 
         (
             pipeline,
@@ -1420,6 +1520,8 @@ class Agent:
             mode="stream" if is_stream else "agent",
             kb_processor=self._kb_processor,
         )
+        if timer:
+            timer.mark("pipeline_built")
         self._context_aggregator = context_aggregator
 
         # Stream mode deliberately leaves self.context=None so end_conversation
@@ -1444,6 +1546,8 @@ class Agent:
             self.conversation_id,
             is_daily_mode=self.is_daily_mode,
         )
+        if timer:
+            timer.mark("pipeline_task_created")
 
         if self.is_daily_mode and hasattr(self.task, "rtvi") and self.task.rtvi:
             self._rtvi_processor = self.task.rtvi
@@ -1456,6 +1560,10 @@ class Agent:
             # RTVI requires ENABLE_BREEZE_BUDDY_DAILY_EVENTS=true; without it
             # approval_manager stays None and gated calls are denied.
             if not is_stream:
+                from app.ai.voice.agents.breeze_buddy.agent.approval import (
+                    ApprovalManager,
+                )
+
                 self.approval_manager = ApprovalManager(emit=self._emit_rtvi_event)
                 if self._user_idle_callback_handler:
                     # While an approval card is showing, the user is silently
@@ -1478,6 +1586,10 @@ class Agent:
             mcp_config = self.configurations.mcp if self.configurations else None
             if mcp_config and mcp_config.servers:
                 try:
+                    from app.ai.voice.agents.breeze_buddy.mcp import (
+                        get_mcp_global_functions,
+                    )
+
                     mcp_global_functions = await get_mcp_global_functions(
                         mcp_config=mcp_config,
                         template_vars=self.template_vars,
@@ -1491,6 +1603,8 @@ class Agent:
                     )
 
             assert llm is not None  # narrowed: non-stream path always has LLM
+            from app.ai.voice.agents.breeze_buddy.agent.flow import setup_flow_manager
+
             self.flow_manager = setup_flow_manager(
                 task=self.task,
                 llm=llm,
@@ -1501,6 +1615,10 @@ class Agent:
                 bot_instance=self,
                 mcp_global_functions=mcp_global_functions,
             )
+            if timer:
+                timer.mark("flow_manager_created")
+        elif timer:
+            timer.mark("flow_manager_skipped_stream")
 
         # ── Real-time observers ──────────────────────────────────
         observers_config = (
@@ -1513,6 +1631,11 @@ class Agent:
         )
         if observers_config and not is_stream:
             try:
+                from app.ai.voice.agents.breeze_buddy.observers import (
+                    ObserverManager,
+                    build_observers,
+                )
+
                 observer_instances = await build_observers(
                     configs=observers_config,
                     template=self.template,
@@ -1532,6 +1655,8 @@ class Agent:
                 self._observer_manager = None
 
         self._register_event_handlers()
+        if timer:
+            timer.mark("event_handlers_registered")
 
         # Daily transfer (gen>1): the reused, already-joined DailyTransportClient
         # never re-fires on_client_connected (its normal trigger), so drive
@@ -1539,6 +1664,8 @@ class Agent:
         # telephony still go through the on_client_connected event.
         if self.is_daily_mode and self.generation > 1:
             asyncio.create_task(self._drive_client_connected_after_start(self.task))
+
+        from pipecat.pipeline.runner import PipelineRunner
 
         runner = PipelineRunner(handle_sigint=False, force_gc=True)
         log_prefix = "[STREAM] " if is_stream else ""
@@ -1549,6 +1676,8 @@ class Agent:
                 logger.info(
                     f"{log_prefix}Running pipeline for conversation: {self.conversation_id}"
                 )
+                if timer:
+                    timer.mark("pipeline_runner_start")
                 await runner.run(self.task)
         except asyncio.CancelledError:
             logger.info(f"{log_prefix}Pipeline task cancelled. Exiting gracefully.")
@@ -1591,6 +1720,10 @@ class Agent:
                 self.lead.metaData["transcription"] = (
                     self._transcript_collector.get_transcription()
                 )
+
+        from app.ai.voice.agents.breeze_buddy.handlers.internal.end_conversation import (
+            end_conversation,
+        )
 
         context = TemplateContext(self)
         await end_conversation(context, {})

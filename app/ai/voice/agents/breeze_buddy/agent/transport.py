@@ -5,13 +5,10 @@ Note: VAD (Voice Activity Detection) is configured in the LLMUserAggregator
 audio I/O, sample rates, and optional audio filters/mixers.
 """
 
-from pathlib import Path
-from typing import Optional
+from __future__ import annotations
 
-from pipecat.audio.filters.aic_filter import AICFilter
-from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
-from pipecat.transports.daily.transport import DailyParams
-from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pathlib import Path
+from typing import Any, Optional
 
 from app.ai.voice.agents.breeze_buddy.template.types import (
     ConfigurationModel,
@@ -21,9 +18,6 @@ from app.ai.voice.agents.breeze_buddy.template.types import (
     TemplateModel,
 )
 from app.ai.voice.agents.breeze_buddy.template.vad import TELEPHONY_SAMPLE_RATE
-from app.ai.voice.agents.breeze_buddy.utils.audio_mixer import (
-    create_background_sound_mixer,
-)
 from app.core.config import static
 from app.core.logger import logger
 
@@ -59,7 +53,7 @@ def _get_aic_model_path(transport_type: str) -> Path:
 def _create_audio_input_filter(
     configurations: Optional[ConfigurationModel] = None,
     transport_type: str = TRANSPORT_TYPE_DAILY,
-) -> Optional[BaseAudioFilter]:
+) -> Optional[Any]:
     """Create audio input filter based on configuration.
 
     Currently supports:
@@ -115,6 +109,8 @@ def _create_audio_input_filter(
             return None
 
         try:
+            from pipecat.audio.filters.aic_filter import AICFilter
+
             if noise_filter_config.enhancement_level is None:
                 # Preserve the existing AIC behavior exactly: omitting this
                 # argument lets the selected model use its own default.
@@ -167,6 +163,13 @@ def get_transport_params(
     Returns:
         Dictionary mapping transport types to parameter factory functions
     """
+    from pipecat.transports.daily.transport import DailyParams
+    from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+
+    from app.ai.voice.agents.breeze_buddy.utils.audio_mixer import (
+        create_background_sound_mixer,
+    )
+
     # Create separate mixers per transport so each uses the correct sample rate.
     # Daily runs at 24 kHz; all telephony transports run at TELEPHONY_SAMPLE_RATE (8 kHz).
     daily_mixer = create_background_sound_mixer(template, sample_rate=24000)

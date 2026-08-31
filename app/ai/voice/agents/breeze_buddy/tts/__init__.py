@@ -1,6 +1,5 @@
 """TTS service utilities for Breeze Buddy voice agent."""
 
-from pipecat.services.cartesia.tts import GenerationConfig
 from pipecat.transcriptions.language import Language
 
 from app.ai.voice.agents.breeze_buddy.template.types import (
@@ -15,30 +14,6 @@ from app.ai.voice.agents.breeze_buddy.tts.emoji_filter import (
     EmojiTextFilter,
     strip_emojis,
 )
-from app.ai.voice.agents.breeze_buddy.utils.common import convert_to_mulaw
-from app.ai.voice.tts import (
-    CartesiaConfig,
-    DragonTTSConfig,
-    ElevenLabsConfig,
-    GeminiConfig,
-    GoogleConfig,
-    SarvamTTSConfig,
-    SonioxTTSConfig,
-    build_cartesia_tts,
-    build_dragontts_tts,
-    build_elevenlabs_tts,
-    build_gemini_tts,
-    build_google_tts,
-    build_sarvam_tts,
-    build_soniox_tts,
-)
-from app.ai.voice.tts.cartesia import _generate_cartesia_audio
-from app.ai.voice.tts.dragontts import _collect_params, _generate_dragontts_audio
-from app.ai.voice.tts.elevenlabs import _generate_elevenlabs_audio
-from app.ai.voice.tts.gemini import _generate_gemini_audio
-from app.ai.voice.tts.google import _generate_google_audio
-from app.ai.voice.tts.sarvam import _generate_sarvam_audio
-from app.ai.voice.tts.soniox import _generate_soniox_audio
 from app.core.config.dynamic import (
     BB_AGGREGATE_SENTENCES,
     BB_ENABLE_ELEVENLABS_INDIAN_RESIDENCY,
@@ -146,6 +121,12 @@ async def get_tts_service(voice_config: TTSConfig):
     if provider == "dragontts" or (
         voice_config.enable_tts_caching is True and await is_dragontts_healthy()
     ):
+        from app.ai.voice.tts.dragontts import (
+            DragonTTSConfig,
+            _collect_params,
+            build_dragontts_tts,
+        )
+
         if provider == "dragontts":
             # Legacy: model already carries "<provider>:<model>".
             model_id = voice_config.model
@@ -200,6 +181,11 @@ async def get_tts_service(voice_config: TTSConfig):
         text_filters.append(EmojiTextFilter())
 
     if provider == "elevenlabs":
+        from app.ai.voice.tts.elevenlabs import (
+            ElevenLabsConfig,
+            build_elevenlabs_tts,
+        )
+
         use_indian_residency = await BB_ENABLE_ELEVENLABS_INDIAN_RESIDENCY()
         if use_indian_residency and not ELEVENLABS_INDIAN_RESIDENCY_API_KEY:
             raise ValueError(
@@ -236,6 +222,9 @@ async def get_tts_service(voice_config: TTSConfig):
         )
 
     elif provider == "cartesia":
+        from app.ai.voice.tts.cartesia import CartesiaConfig, build_cartesia_tts
+        from pipecat.services.cartesia.tts import GenerationConfig
+
         if not CARTESIA_API_KEY:
             raise ValueError("CARTESIA_API_KEY is required for Cartesia TTS")
 
@@ -260,6 +249,8 @@ async def get_tts_service(voice_config: TTSConfig):
         )
 
     elif provider == "sarvam":
+        from app.ai.voice.tts.sarvam import SarvamTTSConfig, build_sarvam_tts
+
         if not SARVAM_API_KEY:
             raise ValueError("SARVAM_API_KEY is required for Sarvam TTS")
 
@@ -279,6 +270,8 @@ async def get_tts_service(voice_config: TTSConfig):
         )
 
     elif provider == "gemini":
+        from app.ai.voice.tts.gemini import GeminiConfig, build_gemini_tts
+
         if not GOOGLE_CREDENTIALS_JSON:
             raise ValueError("GOOGLE_CREDENTIALS_JSON is required for Gemini TTS")
 
@@ -294,6 +287,8 @@ async def get_tts_service(voice_config: TTSConfig):
         )
 
     elif provider == "google":
+        from app.ai.voice.tts.google import GoogleConfig, build_google_tts
+
         if not GOOGLE_CREDENTIALS_JSON:
             raise ValueError("GOOGLE_CREDENTIALS_JSON is required for Google TTS")
 
@@ -310,6 +305,8 @@ async def get_tts_service(voice_config: TTSConfig):
         )
 
     elif provider == "soniox":
+        from app.ai.voice.tts.soniox import SonioxTTSConfig, build_soniox_tts
+
         if not SONIOX_API_KEY:
             raise ValueError("SONIOX_API_KEY is required for Soniox TTS")
 
@@ -374,6 +371,8 @@ async def generate_audio(
         and resolved.enable_tts_caching is True
         and await is_dragontts_healthy()
     ):
+        from app.ai.voice.tts.dragontts import _generate_dragontts_audio
+
         if provider != "dragontts":
             if not resolved.model:
                 raise ValueError("enable_tts_caching requires a model")
@@ -386,6 +385,8 @@ async def generate_audio(
         return await _generate_dragontts_audio(text=text, resolved=resolved)
 
     if provider == "sarvam":
+        from app.ai.voice.tts.sarvam import _generate_sarvam_audio
+
         audio_data = await _generate_sarvam_audio(
             text=text,
             voice_id=resolved.voice_id,
@@ -396,6 +397,8 @@ async def generate_audio(
         )
         input_format = "raw"
     elif provider == "elevenlabs":
+        from app.ai.voice.tts.elevenlabs import _generate_elevenlabs_audio
+
         use_indian_residency = await BB_ENABLE_ELEVENLABS_INDIAN_RESIDENCY()
         audio_data = await _generate_elevenlabs_audio(
             text=text,
@@ -411,6 +414,8 @@ async def generate_audio(
         )
         input_format = "ulaw"
     elif provider == "cartesia":
+        from app.ai.voice.tts.cartesia import _generate_cartesia_audio
+
         audio_data = await _generate_cartesia_audio(
             text=text,
             voice_id=resolved.voice_id,
@@ -418,6 +423,8 @@ async def generate_audio(
         )
         input_format = "raw"
     elif provider == "gemini":
+        from app.ai.voice.tts.gemini import _generate_gemini_audio
+
         audio_data = await _generate_gemini_audio(
             text=text,
             voice_id=resolved.voice_id,
@@ -428,6 +435,8 @@ async def generate_audio(
         # _generate_gemini_audio already downsamples to 16 kHz PCM
         input_format = "raw"
     elif provider == "google":
+        from app.ai.voice.tts.google import _generate_google_audio
+
         audio_data = await _generate_google_audio(
             text=text,
             voice_id=resolved.voice_id,
@@ -436,6 +445,8 @@ async def generate_audio(
         # _generate_google_audio already downsamples to 16 kHz PCM
         input_format = "raw"
     elif provider == "soniox":
+        from app.ai.voice.tts.soniox import _generate_soniox_audio
+
         audio_data = await _generate_soniox_audio(
             text=text,
             voice=resolved.voice_id,
@@ -445,6 +456,8 @@ async def generate_audio(
         input_format = "raw"
     else:
         raise ValueError(f"Unsupported TTS provider: {provider}")
+
+    from app.ai.voice.agents.breeze_buddy.utils.common import convert_to_mulaw
 
     mulaw_audio = convert_to_mulaw(audio_data, input_format=input_format)
     return mulaw_audio

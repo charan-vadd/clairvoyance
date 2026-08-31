@@ -38,7 +38,7 @@ from app.database.queries.breeze_buddy.lead_call_tracker import (
     update_lead_request_id_query,
     update_lead_template_query,
 )
-from app.schemas import (
+from app.schemas.breeze_buddy.core import (
     TEMPLATELESS_PLACEHOLDER_TEMPLATES,
     CallDirection,
     ExecutionMode,

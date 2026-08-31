@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import audioop
 import base64
 import json
@@ -5,16 +7,16 @@ import os
 import re
 from datetime import datetime, timezone
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
-from pipecat.frames.frames import OutputAudioRawFrame
-from pydub import AudioSegment
-
-from app.ai.voice.llm.types import RealtimeLLMProvider
 from app.core.config.static import ORDER_CONFIRMATION_WEBHOOK_SECRET_KEY
 from app.core.logger import logger
 from app.core.security.sha import calculate_hmac_sha256
 from app.services.redis.client import get_redis_service
+
+if TYPE_CHECKING:
+    from pipecat.frames.frames import OutputAudioRawFrame
+    from pydub import AudioSegment
 
 
 def _gemini_realtime_config(template) -> Optional[Any]:
@@ -39,6 +41,8 @@ def gemini_realtime_from_configurations(configurations) -> Optional[Any]:
     """
     llm_configs = getattr(configurations, "llm_configurations", None)
     realtime = getattr(llm_configs, "realtime", None)
+    from app.ai.voice.llm.types import RealtimeLLMProvider
+
     if realtime is not None and realtime.provider == RealtimeLLMProvider.GEMINI:
         return realtime
     return None
@@ -125,6 +129,8 @@ def convert_to_mulaw(audio_data: bytes, input_format: str = "raw") -> bytes:
             return mulaw_data
 
         # For MP3 format from ElevenLabs
+        from pydub import AudioSegment
+
         audio_segment = cast(
             AudioSegment, AudioSegment.from_file(BytesIO(audio_data), format="mp3")
         )
@@ -195,6 +201,9 @@ def load_audio(audio_path) -> OutputAudioRawFrame | None:
 
     if os.path.exists(audio_path):
         try:
+            from pipecat.frames.frames import OutputAudioRawFrame
+            from pydub import AudioSegment
+
             # Load audio file using pydub and convert to transport format
             audio_segment = cast(AudioSegment, AudioSegment.from_wav(audio_path))
 
@@ -539,6 +548,8 @@ async def prepare_initial_greeting_payload(
             )
 
             # Load and convert audio
+            from pydub import AudioSegment
+
             audio = cast(AudioSegment, AudioSegment.from_wav(wav_file_path))
             audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
             pcm_data: bytes = audio.raw_data  # type: ignore[assignment]

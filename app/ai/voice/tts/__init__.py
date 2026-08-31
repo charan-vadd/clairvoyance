@@ -6,13 +6,35 @@ reuse the same provider-specific setup logic.
 
 from __future__ import annotations
 
-from .cartesia import CartesiaConfig, build_cartesia_tts
-from .dragontts import DragonTTSConfig, build_dragontts_tts
-from .elevenlabs import ElevenLabsConfig, build_elevenlabs_tts
-from .gemini import GeminiConfig, build_gemini_tts
-from .google import GoogleConfig, build_google_tts
-from .sarvam import SarvamTTSConfig, build_sarvam_tts, get_sarvam_language
-from .soniox import SonioxTTSConfig, build_soniox_tts
+_LAZY_EXPORTS = {
+    "CartesiaConfig": (".cartesia", "CartesiaConfig"),
+    "build_cartesia_tts": (".cartesia", "build_cartesia_tts"),
+    "DragonTTSConfig": (".dragontts", "DragonTTSConfig"),
+    "build_dragontts_tts": (".dragontts", "build_dragontts_tts"),
+    "ElevenLabsConfig": (".elevenlabs", "ElevenLabsConfig"),
+    "build_elevenlabs_tts": (".elevenlabs", "build_elevenlabs_tts"),
+    "GeminiConfig": (".gemini", "GeminiConfig"),
+    "build_gemini_tts": (".gemini", "build_gemini_tts"),
+    "GoogleConfig": (".google", "GoogleConfig"),
+    "build_google_tts": (".google", "build_google_tts"),
+    "SarvamTTSConfig": (".sarvam", "SarvamTTSConfig"),
+    "build_sarvam_tts": (".sarvam", "build_sarvam_tts"),
+    "get_sarvam_language": (".sarvam", "get_sarvam_language"),
+    "SonioxTTSConfig": (".soniox", "SonioxTTSConfig"),
+    "build_soniox_tts": (".soniox", "build_soniox_tts"),
+}
+
+
+def __getattr__(name: str):
+    """Load provider-specific TTS modules only when their exports are used."""
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    from importlib import import_module
+
+    value = getattr(import_module(module_name, __name__), attr_name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     # Cartesia

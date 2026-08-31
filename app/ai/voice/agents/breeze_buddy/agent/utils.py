@@ -1,15 +1,15 @@
 """Utility functions for voice agents."""
 
+from __future__ import annotations
+
 import audioop
 import base64
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from fastapi import WebSocket
-from pipecat.frames.frames import OutputAudioRawFrame
-from pipecat.pipeline.task import PipelineTask
 
 from app.ai.voice.agents.breeze_buddy.template.types import TemplateModel
 from app.ai.voice.agents.breeze_buddy.utils.common import (
@@ -20,6 +20,9 @@ from app.ai.voice.agents.breeze_buddy.utils.transport.websockets import send_mes
 from app.core.logger import logger
 from app.schemas.breeze_buddy.core import LeadCallTracker
 from app.services.redis.client import get_redis_service
+
+if TYPE_CHECKING:
+    from pipecat.pipeline.task import PipelineTask
 
 # Daily output runs at PipelineParams default (24 kHz, 16-bit, mono); the
 # telephony greeting cache stores mulaw 8 kHz, so we transcode at retrieval.
@@ -208,6 +211,8 @@ async def send_initial_greeting_daily(
             return GreetingResult(source=None, text=None)
 
         pcm_daily = _transcode_mulaw_to_daily_pcm(mulaw_data)
+
+        from pipecat.frames.frames import OutputAudioRawFrame
 
         await task.queue_frame(
             OutputAudioRawFrame(

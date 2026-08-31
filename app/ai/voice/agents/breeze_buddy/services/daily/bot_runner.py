@@ -25,6 +25,7 @@ load_dotenv()
 
 import asyncio  # noqa: E402
 import sys  # noqa: E402
+import time  # noqa: E402
 
 from pipecat.runner.types import DailyRunnerArguments  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
@@ -35,6 +36,9 @@ from app.ai.voice.agents.breeze_buddy.services.daily.daily import (  # noqa: E40
 )
 from app.ai.voice.agents.breeze_buddy.services.daily.launch_payload import (  # noqa: E402
     BotLaunchPayload,
+)
+from app.ai.voice.agents.breeze_buddy.services.daily.startup_timer import (  # noqa: E402
+    DailyStartupTimer,
 )
 from app.core.config.static import (  # noqa: E402
     BB_VOICE_BOT_DB_MAX_OVERFLOW,
@@ -71,6 +75,10 @@ async def _amain(runner_args: DailyRunnerArguments) -> None:
     # `or {}` narrows pipecat's `body: Any | None` — _parse_payload already
     # guarantees a dict with a truthy lead_id.
     lead_id = (runner_args.body or {})["lead_id"]
+    timer = DailyStartupTimer.from_runner_body(
+        runner_args.body or {}, component="bot_runner"
+    )
+    timer.mark("amain_begin")
     logger.info(f"[bot_runner] starting Daily bot subprocess for lead {lead_id}")
     # Size the per-call pool explicitly BEFORE anything touches the DB —
     # lazy first-use init would open the API pod's full default pool
@@ -79,8 +87,10 @@ async def _amain(runner_args: DailyRunnerArguments) -> None:
         min_size=BB_VOICE_BOT_DB_POOL_SIZE,
         max_size=BB_VOICE_BOT_DB_POOL_SIZE + BB_VOICE_BOT_DB_MAX_OVERFLOW,
     )
+    timer.mark("db_pool_initialized")
     try:
         # daily_bot's own finally closes the aiohttp session.
+        timer.mark("daily_bot_starting")
         await daily_bot(
             runner_args, daily_completion_function, create_aiohttp_session()
         )
@@ -98,12 +108,18 @@ async def _amain(runner_args: DailyRunnerArguments) -> None:
 
 def main() -> None:
     """Read the launch payload from stdin and run the bot."""
+    process_started_at = time.perf_counter()
     raw = sys.stdin.read()
+    stdin_read_ms = (time.perf_counter() - process_started_at) * 1000
     try:
         runner_args = _parse_payload(raw)
     except ValueError as exc:
         logger.error(f"[bot_runner] invalid launch payload: {exc}")
         sys.exit(2)
+    timer = DailyStartupTimer.from_runner_body(
+        runner_args.body or {}, component="bot_runner_main"
+    )
+    timer.mark("payload_read", stdin_read_ms=f"{stdin_read_ms:.1f}", raw_bytes=len(raw))
     asyncio.run(_amain(runner_args))
 
 

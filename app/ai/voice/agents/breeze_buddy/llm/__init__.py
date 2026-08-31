@@ -11,26 +11,13 @@ Dispatch logic:
 
 from __future__ import annotations
 
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
-from pipecat.services.azure.llm import AzureLLMService
-from pipecat.services.google.vertex.llm import GoogleVertexLLMService
-from pipecat.services.openai.llm import OpenAILLMService
-
-from app.ai.voice.llm import (
-    AzureConfig,
-    ClaudeVertexConfig,
+from app.ai.voice.llm.types import (
     LLMConfiguration,
     LLMProvider,
     LLMSdk,
-    OpenAIConfig,
-    VertexConfig,
-    build_azure_llm,
-    build_claude_vertex_llm,
-    build_openai_llm,
-    build_vertex_llm,
 )
-from app.ai.voice.llm.claude_vertex import VertexAnthropicLLMService
 from app.core.config.dynamic import (
     BREEZE_BUDDY_AZURE_MAX_COMPLETION_TOKENS,
     BREEZE_BUDDY_AZURE_TEMPERATURE,
@@ -48,6 +35,12 @@ from app.core.config.static import (
 )
 from app.core.logger import logger
 from app.services.live_config.store import get_config
+
+if TYPE_CHECKING:
+    from app.ai.voice.llm.claude_vertex import VertexAnthropicLLMService
+    from pipecat.services.azure.llm import AzureLLMService
+    from pipecat.services.google.vertex.llm import GoogleVertexLLMService
+    from pipecat.services.openai.llm import OpenAILLMService
 
 
 async def _resolve_azure(
@@ -101,6 +94,8 @@ async def _resolve_azure(
     reasoning_effort = None
     if llm_config and llm_config.thinking and llm_config.thinking.enabled:
         reasoning_effort = llm_config.thinking.reasoning_effort
+
+    from app.ai.voice.llm.azure import AzureConfig, build_azure_llm
 
     return build_azure_llm(
         AzureConfig(
@@ -160,6 +155,8 @@ async def _resolve_openai(llm_config: LLMConfiguration | None) -> OpenAILLMServi
     reasoning_effort = None
     if llm_config and llm_config.thinking and llm_config.thinking.enabled:
         reasoning_effort = llm_config.thinking.reasoning_effort
+
+    from app.ai.voice.llm.openai import OpenAIConfig, build_openai_llm
 
     return build_openai_llm(
         OpenAIConfig(
@@ -223,6 +220,8 @@ async def _resolve_vertex(llm_config: LLMConfiguration) -> GoogleVertexLLMServic
         thinking_budget = llm_config.thinking.thinking_budget
         thinking_level = llm_config.thinking.thinking_level
 
+    from app.ai.voice.llm.vertex import VertexConfig, build_vertex_llm
+
     return build_vertex_llm(
         VertexConfig(
             credentials_json=credentials_json,
@@ -285,6 +284,11 @@ async def _resolve_claude_vertex(
             )
         thinking_enabled = True
         thinking_budget_tokens = llm_config.thinking.budget_tokens
+
+    from app.ai.voice.llm.claude_vertex import (
+        ClaudeVertexConfig,
+        build_claude_vertex_llm,
+    )
 
     return build_claude_vertex_llm(
         ClaudeVertexConfig(

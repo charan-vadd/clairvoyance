@@ -9,14 +9,16 @@ File naming convention (in static/audio/):
   <name>_24k.mp3/.wav — 24000 Hz mono (Daily WebRTC)
 """
 
-import os
-from typing import Optional
+from __future__ import annotations
 
-import soundfile
-from pipecat.audio.mixers.soundfile_mixer import SoundfileMixer
+import os
+from typing import TYPE_CHECKING, Optional
 
 from app.ai.voice.agents.breeze_buddy.template.types import BackgroundSoundFile
 from app.core.logger import logger
+
+if TYPE_CHECKING:
+    from pipecat.audio.mixers.soundfile_mixer import SoundfileMixer
 
 # Base path for bundled audio assets
 _AUDIO_PATH = "app/ai/voice/agents/breeze_buddy/static/audio"
@@ -49,6 +51,8 @@ def _validate_audio_file(path: str) -> bool:
     if not os.path.exists(path):
         return False
     try:
+        import soundfile
+
         info = soundfile.info(path)
         if info.channels != 1:
             logger.warning(
@@ -180,6 +184,8 @@ def create_background_sound_mixer(
     start_mixing = has_ambient
 
     try:
+        from pipecat.audio.mixers.soundfile_mixer import SoundfileMixer
+
         mixer = SoundfileMixer(
             sound_files=sound_files,
             default_sound=default_sound,

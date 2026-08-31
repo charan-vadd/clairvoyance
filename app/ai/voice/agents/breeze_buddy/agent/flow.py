@@ -1,28 +1,14 @@
 """Flow management and node configuration for voice agents."""
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, cast
 
-from pipecat.services.azure.llm import AzureLLMService
-from pipecat_flows import FlowManager, NodeConfig
-from pipecat_flows.types import FlowsDirectFunction, FlowsFunctionSchema
-
-from app.ai.voice.agents.breeze_buddy.services.knowledge_base import (
-    build_kb_system_message,
-)
-from app.ai.voice.agents.breeze_buddy.template.builder import FlowConfigBuilder
 from app.ai.voice.agents.breeze_buddy.template.loader import FlowConfigLoader
-from app.ai.voice.agents.breeze_buddy.template.types import (
-    ConfigurationModel,
-    TemplateModel,
-)
 from app.ai.voice.agents.breeze_buddy.template.utils import validate_template_compat
-from app.ai.voice.agents.breeze_buddy.utils.language_utils.prompt_injections import (
-    inject_language_rules,
-)
 from app.ai.voice.agents.breeze_buddy.utils.playground import (
     apply_playground_overrides,
 )
-from app.ai.voice.llm.types import RealtimeLLMProvider
 from app.core.logger import logger
 from app.schemas.breeze_buddy.core import ExecutionMode, LeadCallTracker
 
@@ -86,6 +72,9 @@ def setup_flow_manager(
     Returns:
         Configured FlowManager
     """
+    from pipecat_flows import FlowManager
+    from pipecat_flows.types import FlowsDirectFunction, FlowsFunctionSchema
+
     global_functions = flow_builder.build_global_functions(
         flow=template.flow, bot_instance=bot_instance
     )
@@ -179,6 +168,14 @@ def prepare_initial_node(
     Returns:
         Configured NodeConfig for the initial node
     """
+    from app.ai.voice.agents.breeze_buddy.services.knowledge_base import (
+        build_kb_system_message,
+    )
+    from app.ai.voice.agents.breeze_buddy.utils.language_utils.prompt_injections import (
+        inject_language_rules,
+    )
+    from app.ai.voice.llm.types import RealtimeLLMProvider
+
     initial_node_name = flow_config["initial_node"]
     node_config = flow_config["nodes"][initial_node_name]
 

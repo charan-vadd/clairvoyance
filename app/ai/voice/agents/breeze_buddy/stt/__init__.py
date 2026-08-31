@@ -17,16 +17,6 @@ from app.ai.voice.agents.breeze_buddy.template.types import (
     STTConfiguration,
     STTProvider,
 )
-from app.ai.voice.stt import (
-    DeepgramConfig,
-    SarvamConfig,
-    SonioxConfig,
-    build_deepgram_stt,
-    build_google_stt,
-    build_openai_stt,
-    build_sarvam_stt,
-    build_soniox_stt,
-)
 from app.core.config.dynamic import (
     BB_SARVAM_STT_HIGH_VAD_SENSITIVITY,
     BB_SARVAM_STT_LANGUAGE_CODE,
@@ -89,6 +79,8 @@ async def create_stt_from_config(config: STTConfiguration):
     come from the template config with sensible defaults baked in.
     """
     if config.provider == STTProvider.DEEPGRAM:
+        from app.ai.voice.stt.deepgram import DeepgramConfig, build_deepgram_stt
+
         if not DEEPGRAM_API_KEY:
             raise ValueError("DEEPGRAM_API_KEY is required for deepgram STT")
 
@@ -114,6 +106,8 @@ async def create_stt_from_config(config: STTConfiguration):
         )
 
     if config.provider == STTProvider.SONIOX:
+        from app.ai.voice.stt.soniox import SonioxConfig, build_soniox_stt
+
         if not SONIOX_API_KEY:
             raise ValueError("SONIOX_API_KEY is required for soniox STT")
 
@@ -143,6 +137,8 @@ async def create_stt_from_config(config: STTConfiguration):
         )
 
     if config.provider == STTProvider.SARVAM:
+        from app.ai.voice.stt.sarvam import SarvamConfig, build_sarvam_stt
+
         if not SARVAM_API_KEY:
             raise ValueError("SARVAM_API_KEY is required for sarvam STT")
 
@@ -167,6 +163,8 @@ async def create_stt_from_config(config: STTConfiguration):
         )
 
     if config.provider == STTProvider.OPENAI:
+        from app.ai.voice.stt.openai import build_openai_stt
+
         if not OPENAI_STT_API_KEY:
             raise ValueError("OPENAI_STT_API_KEY is required for openai STT")
         logger.info("Using OpenAI STT service for Breeze Buddy")
@@ -178,6 +176,8 @@ async def create_stt_from_config(config: STTConfiguration):
         )
 
     # Default: Google
+    from app.ai.voice.stt.google import build_google_stt
+
     logger.info("Using Google STT service for Breeze Buddy")
     return build_google_stt(credentials_json=GOOGLE_CREDENTIALS_JSON)
 

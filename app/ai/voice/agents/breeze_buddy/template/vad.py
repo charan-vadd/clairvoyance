@@ -12,10 +12,9 @@ For the full mute_stt/unmute_stt routing (VAD → TranscriptionGate fallback),
 see handlers/internal/stt.py.
 """
 
-from typing import Optional
+from __future__ import annotations
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+from typing import TYPE_CHECKING, Optional
 
 from app.ai.voice.agents.breeze_buddy.template.context import TemplateContext
 from app.ai.voice.agents.breeze_buddy.template.types import TemplateModel
@@ -32,6 +31,10 @@ from app.core.config.dynamic import (
 )
 from app.core.logger import logger
 
+if TYPE_CHECKING:
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
 # Constants
 TELEPHONY_SAMPLE_RATE = 8000
 DAILY_SAMPLE_RATE = 16000
@@ -39,6 +42,8 @@ DAILY_SAMPLE_RATE = 16000
 
 async def create_daily_vad_params() -> VADParams:
     """Create VAD parameters for Daily mode from Redis dynamic config."""
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     return VADParams(
         confidence=await BB_DAILY_VAD_CONFIDENCE(),
         start_secs=await BB_DAILY_VAD_START_SECS(),
@@ -49,6 +54,8 @@ async def create_daily_vad_params() -> VADParams:
 
 async def create_telephony_vad_params() -> VADParams:
     """Create VAD parameters for telephony mode from Redis dynamic config."""
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     return VADParams(
         confidence=await BB_TELEPHONY_VAD_CONFIDENCE(),
         start_secs=await BB_TELEPHONY_VAD_START_SECS(),
@@ -72,6 +79,8 @@ def _layer_template_vad(
     )
     if not template_vad:
         return defaults
+
+    from pipecat.audio.vad.vad_analyzer import VADParams
 
     logger.info(f"Template VAD config: {template_vad}")
     return VADParams(
@@ -140,6 +149,8 @@ async def create_vad_analyzer(
         params = await build_telephony_vad_params(template)
         sample_rate = TELEPHONY_SAMPLE_RATE
 
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+
     return SileroVADAnalyzer(sample_rate=sample_rate, params=params), params
 
 
@@ -150,6 +161,8 @@ def reset_vad_to_default(context: TemplateContext):
     """Reset VAD params to the call-level default captured at startup."""
     bot = context.bot
     if bot.vad_analyzer and bot.default_vad_params:
+        from pipecat.audio.vad.vad_analyzer import VADParams
+
         old_confidence = bot.vad_analyzer.params.confidence
         bot.vad_analyzer.set_params(
             VADParams(
@@ -198,6 +211,8 @@ def _apply_vad_config_to_analyzer(vad_analyzer, vad_config, call_sid: str):
     Supports both dict and object access patterns for vad_config.
     Uses set_params() to ensure internal frame counts are recalculated.
     """
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     old_params = {
         "confidence": vad_analyzer.params.confidence,
         "start_secs": vad_analyzer.params.start_secs,
@@ -245,6 +260,8 @@ def mute_vad(context: TemplateContext):
     Stores previous params so they can be restored on unmute.
     Only call this when context.vad_analyzer is available.
     """
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     context.bot._pre_mute_vad_params = {
         "confidence": context.vad_analyzer.params.confidence,
         "start_secs": context.vad_analyzer.params.start_secs,
@@ -274,6 +291,8 @@ def unmute_vad(context: TemplateContext):
     context.vad_analyzer is available — which also guarantees
     bot.default_vad_params is set (see create_vad_analyzer).
     """
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     old_confidence = context.vad_analyzer.params.confidence
     bot = context.bot
 

@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from functools import wraps
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -9,13 +11,15 @@ from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from app.ai.voice.agents.breeze_buddy.template.context import TemplateContext
 from app.core.config.static import (
     BUDDY_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
     BUDDY_OTEL_EXPORTER_OTLP_TRACES_HEADERS,
     ENABLE_BREEZE_BUDDY_TRACING,
 )
 from app.core.logger import logger
+
+if TYPE_CHECKING:
+    from app.ai.voice.agents.breeze_buddy.template.context import TemplateContext
 
 # Module-level idempotency guard to prevent multiple tracing initializations
 _tracing_initialized = False

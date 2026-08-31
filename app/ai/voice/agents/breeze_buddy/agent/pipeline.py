@@ -1,58 +1,12 @@
 """Pipeline creation and service initialization for voice agents."""
 
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import (
-    LocalSmartTurnAnalyzerV3,
-)
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
-from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
-from pipecat.observers.loggers.transcription_log_observer import (
-    TranscriptionLogObserver,
-)
-from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import (
-    LLMContextAggregatorPair,
-    LLMUserAggregatorParams,
-)
-from pipecat.processors.frameworks.rtvi import (
-    RTVIFunctionCallReportLevel,
-    RTVIObserverParams,
-)
-from pipecat.turns.user_mute import AlwaysUserMuteStrategy, BaseUserMuteStrategy
-from pipecat.turns.user_start import (
-    BaseUserTurnStartStrategy,
-    MinWordsUserTurnStartStrategy,
-    TranscriptionUserTurnStartStrategy,
-    VADUserTurnStartStrategy,
-    WakePhraseUserTurnStartStrategy,
-)
-from pipecat.turns.user_stop import (
-    BaseUserTurnStopStrategy,
-    SpeechTimeoutUserTurnStopStrategy,
-    TurnAnalyzerUserTurnStopStrategy,
-)
-from pipecat.turns.user_turn_strategies import UserTurnStrategies
-
 from app.ai.voice.agents.breeze_buddy.llm import get_llm_service
-from app.ai.voice.agents.breeze_buddy.observability.tracing_setup import setup_tracing
-from app.ai.voice.agents.breeze_buddy.processors import (
-    KnowledgeRetrievalProcessor,
-    TranscriptCollectorProcessor,
-    TranscriptionGateProcessor,
-    UserIdleCallbackHandler,
-)
-from app.ai.voice.agents.breeze_buddy.processors.metrics_collector_processor import (
-    MetricsCollectorProcessor,
-)
 from app.ai.voice.agents.breeze_buddy.stt import get_stt_service
 from app.ai.voice.agents.breeze_buddy.template.types import (
     ConfigurationModel,
@@ -63,13 +17,25 @@ from app.ai.voice.agents.breeze_buddy.template.types import (
 )
 from app.ai.voice.agents.breeze_buddy.template.vad import TELEPHONY_SAMPLE_RATE
 from app.ai.voice.agents.breeze_buddy.tts import get_tts_service, resolve_voice_config
-from app.ai.voice.llm.realtime import get_realtime_llm_service
 from app.core.config.static import (
     ENABLE_BREEZE_BUDDY_DAILY_EVENTS,
     ENABLE_BREEZE_BUDDY_TRACING,
     ENVIRONMENT,
 )
 from app.core.logger import logger
+
+if TYPE_CHECKING:
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.task import PipelineTask
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    from app.ai.voice.agents.breeze_buddy.processors.knowledge_retrieval import (
+        KnowledgeRetrievalProcessor,
+    )
+    from app.ai.voice.agents.breeze_buddy.processors.transcript_collector import (
+        TranscriptCollectorProcessor,
+    )
 
 
 def get_observers() -> list[Any]:
@@ -83,9 +49,17 @@ def get_observers() -> list[Any]:
     single greeting-latency event per call — misleading as a "latency"
     signal. See TODO.md §2 for follow-up.
     """
+    from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
+
     observers: list[Any] = [MetricsLogObserver()]
 
     if ENVIRONMENT.lower() == "dev":
+        from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
+        from pipecat.observers.loggers.transcription_log_observer import (
+            TranscriptionLogObserver,
+        )
+        from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+
         observers.extend(
             [
                 LLMLogObserver(),
@@ -132,6 +106,8 @@ async def create_services(
         # pipeline can wire the realtime service directly between transport
         # input/output and the context aggregators.
         assert llm_config is not None  # narrowed by is_realtime
+        from app.ai.voice.llm.realtime import get_realtime_llm_service
+
         realtime_llm = await get_realtime_llm_service(llm_config)
         logger.info(
             "[REALTIME] Skipping separate STT and TTS service creation; "
@@ -180,7 +156,7 @@ async def create_services(
 
 
 def _wire_user_idle_event(
-    user_aggregator: Any, handler: Optional[UserIdleCallbackHandler]
+    user_aggregator: Any, handler: Optional[Any]
 ) -> None:
     """Bind the on_user_turn_idle event on the aggregator to the handler.
 
@@ -211,10 +187,10 @@ async def build_pipeline(
     Pipeline,
     LLMContext,
     Any,
-    Optional[UserIdleCallbackHandler],
-    Optional[TranscriptionGateProcessor],
+    Optional[Any],
+    Optional[Any],
     Optional[TranscriptCollectorProcessor],
-    MetricsCollectorProcessor,
+    Any,
 ]:
     """Build the processing pipeline.
 
@@ -259,6 +235,32 @@ async def build_pipeline(
         - transcript_collector: TranscriptCollectorProcessor instance (stream mode only, None in agent mode)
         - metrics_collector: MetricsCollectorProcessor for capturing pipecat metrics
     """
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import (
+        LLMContextAggregatorPair,
+        LLMUserAggregatorParams,
+    )
+    from pipecat.turns.user_mute import AlwaysUserMuteStrategy
+    from pipecat.turns.user_start import (
+        MinWordsUserTurnStartStrategy,
+        TranscriptionUserTurnStartStrategy,
+        VADUserTurnStartStrategy,
+        WakePhraseUserTurnStartStrategy,
+    )
+    from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+    from app.ai.voice.agents.breeze_buddy.processors.metrics_collector_processor import (
+        MetricsCollectorProcessor,
+    )
+    from app.ai.voice.agents.breeze_buddy.processors.transcription_gate import (
+        TranscriptionGateProcessor,
+    )
+    from app.ai.voice.agents.breeze_buddy.processors.user_idle import (
+        UserIdleCallbackHandler,
+    )
+
     is_stream = mode == "stream"
 
     # Create the metrics collector processor
@@ -365,6 +367,9 @@ async def build_pipeline(
     # external VAD was provided.  SmartTurn needs is_speech signal from VAD.
     # When no external VAD exists this is the telephony path (8 kHz sample rate).
     if turn_detection_mode == TurnDetectionMode.SMART_TURN and vad_analyzer is None:
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
+        from pipecat.audio.vad.vad_analyzer import VADParams
+
         vad_analyzer = SileroVADAnalyzer(
             sample_rate=TELEPHONY_SAMPLE_RATE,
             params=VADParams(stop_secs=0.2),
@@ -374,7 +379,7 @@ async def build_pipeline(
         )
 
     # --- User turn start strategies ---
-    start_strategies: list[BaseUserTurnStartStrategy] = []
+    start_strategies: list[Any] = []
 
     # Wake phrase: prepended first so it gates all subsequent strategies.
     wake_cfg = getattr(configurations, "wake_phrase", None)
@@ -415,8 +420,14 @@ async def build_pipeline(
         start_strategies.append(TranscriptionUserTurnStartStrategy(use_interim=True))
 
     # --- User turn stop strategy (driven by stt_configuration.turn_detection) ---
-    stop_strategies: list[BaseUserTurnStopStrategy] = []
+    stop_strategies: list[Any] = []
     if turn_detection_mode == TurnDetectionMode.SMART_TURN:
+        from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+        from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import (
+            LocalSmartTurnAnalyzerV3,
+        )
+        from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+
         st = (
             stt_config.smart_turn
             if stt_config and stt_config.smart_turn
@@ -463,7 +474,7 @@ async def build_pipeline(
     # User mute strategies:
     # disabled_discard → AlwaysUserMuteStrategy: drops all user frames while bot speaks,
     # including InterruptionFrame, VAD frames, transcription frames, and raw audio.
-    user_mute_strategies: list[BaseUserMuteStrategy] = []
+    user_mute_strategies: list[Any] = []
     if interruption_config.mode == InterruptionMode.DISABLED_DISCARD:
         user_mute_strategies.append(AlwaysUserMuteStrategy())
         logger.info("Interruption: mode=disabled_discard — user muted while bot speaks")
@@ -506,6 +517,10 @@ async def build_pipeline(
     # TTS text for DB storage (no LLMContext to pull from at end-of-conversation).
     transcript_collector: Optional[TranscriptCollectorProcessor] = None
     if is_stream:
+        from app.ai.voice.agents.breeze_buddy.processors.transcript_collector import (
+            TranscriptCollectorProcessor,
+        )
+
         transcript_collector = TranscriptCollectorProcessor()
 
     # Pipeline order:
@@ -572,6 +587,12 @@ async def create_pipeline_task(
     Returns:
         Configured PipelineTask
     """
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+    from pipecat.processors.frameworks.rtvi import (
+        RTVIFunctionCallReportLevel,
+        RTVIObserverParams,
+    )
+
     # Pipecat v0.0.102+ automatically adds RTVIProcessor and RTVIObserver
     # when enable_rtvi=True (default). We just configure the observer params.
     emit_daily_events = is_daily_mode and ENABLE_BREEZE_BUDDY_DAILY_EVENTS
@@ -610,6 +631,10 @@ async def create_pipeline_task(
     }
 
     if ENABLE_BREEZE_BUDDY_TRACING:
+        from app.ai.voice.agents.breeze_buddy.observability.tracing_setup import (
+            setup_tracing,
+        )
+
         setup_tracing("breeze-buddy")
         task_params["conversation_id"] = conversation_id
         task_params["enable_tracing"] = True

@@ -7,12 +7,14 @@ This module handles Daily (web-based) voice session infrastructure:
 - Call completion handling for Daily mode
 """
 
+from __future__ import annotations
+
 import asyncio
 import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from pipecat.runner.types import DailyRunnerArguments
 from pipecat.transports.daily.utils import (
@@ -23,9 +25,12 @@ from pipecat.transports.daily.utils import (
     DailyRoomProperties,
 )
 
-from app.ai.voice.agents.breeze_buddy.agent import daily_bot
 from app.ai.voice.agents.breeze_buddy.services.daily.launch_payload import (
     BotLaunchPayload,
+)
+from app.ai.voice.agents.breeze_buddy.services.daily.startup_timer import (
+    STARTED_AT_EPOCH_MS_KEY,
+    DailyStartupTimer,
 )
 from app.core.config.dynamic import BB_DAILY_BOT_SUBPROCESS
 from app.core.config.static import (
@@ -36,12 +41,8 @@ from app.core.config.static import (
 )
 from app.core.logger import logger
 from app.core.transport.http_client import create_aiohttp_session
-from app.database.accessor.breeze_buddy.lead_call_tracker import (
-    update_lead_call_completion_details,
-    update_lead_call_id_by_id,
-    update_lead_call_recording_url,
-)
-from app.schemas import LeadCallStatus, LeadCallTracker
+if TYPE_CHECKING:
+    from app.schemas.breeze_buddy.core import LeadCallTracker
 
 
 async def daily_completion_function(
@@ -55,6 +56,11 @@ async def daily_completion_function(
     For Daily mode, the call_id is actually the lead_id since Daily doesn't have
     a traditional call_sid like telephony providers.
     """
+    from app.database.accessor.breeze_buddy.lead_call_tracker import (
+        update_lead_call_completion_details,
+    )
+    from app.schemas.breeze_buddy.core import LeadCallStatus
+
     logger.info(f"Daily completion: updating lead {call_id} to FINISHED")
     return await update_lead_call_completion_details(
         id=call_id,
@@ -131,7 +137,12 @@ async def _launch_daily_bot(runner_args: DailyRunnerArguments) -> None:
     # start_daily_session always sets token and builds body around lead_id.
     body = runner_args.body or {}
     lead_id = body["lead_id"]
+    timer = DailyStartupTimer.from_runner_body(body, component="daily_launch")
+    timer.mark("begin")
     if not await BB_DAILY_BOT_SUBPROCESS():
+        timer.mark("subprocess_flag_resolved", subprocess=False)
+        from app.ai.voice.agents.breeze_buddy.agent import daily_bot
+
         # Legacy in-process launch. The aiohttp session lives for the bot's
         # lifetime (global HTTP functions); daily_bot's finally closes it.
         bot_aiohttp_session = create_aiohttp_session()
@@ -139,17 +150,20 @@ async def _launch_daily_bot(runner_args: DailyRunnerArguments) -> None:
             daily_bot(runner_args, daily_completion_function, bot_aiohttp_session)
         )
         _track_live_bot(bot_task)
+        timer.mark("in_process_task_created")
         logger.info(
             f"Started in-process Daily bot for lead_id: {lead_id} "
             "(BB_DAILY_BOT_SUBPROCESS=false)"
         )
         return
+    timer.mark("subprocess_flag_resolved", subprocess=True)
 
     payload = BotLaunchPayload(
         room_url=runner_args.room_url,
         token=runner_args.token or "",
         body=body,
     ).model_dump_json()
+    timer.mark("payload_serialized", payload_bytes=len(payload))
     # Payload goes over stdin, never argv: the Daily bot token must not be
     # visible in `ps` output. stdout/stderr are inherited so the child's
     # loguru output lands in the same container log stream; the environment
@@ -161,6 +175,7 @@ async def _launch_daily_bot(runner_args: DailyRunnerArguments) -> None:
         "app.ai.voice.agents.breeze_buddy.services.daily.bot_runner",
         stdin=asyncio.subprocess.PIPE,
     )
+    timer.mark("subprocess_created", pid=proc.pid)
     # Reap unconditionally from here on: even if the stdin handoff below
     # fails (e.g. the child died on startup), the process must still be
     # awaited so it never lingers as a zombie.
@@ -169,10 +184,12 @@ async def _launch_daily_bot(runner_args: DailyRunnerArguments) -> None:
     try:
         proc.stdin.write(payload.encode())
         await proc.stdin.drain()
+        timer.mark("payload_written", pid=proc.pid)
     finally:
         # Always signal EOF — bot_runner blocks on stdin.read() and a
         # half-written payload must fail its parse instead of hanging it.
         proc.stdin.close()
+    timer.mark("stdin_closed", pid=proc.pid)
     logger.info(f"Spawned Daily bot subprocess (pid={proc.pid}) for lead_id: {lead_id}")
 
 
@@ -202,6 +219,18 @@ async def start_daily_session(
     Returns:
         Dict containing room_url, token (for user), session_id, and lead_id
     """
+    from app.database.accessor.breeze_buddy.lead_call_tracker import (
+        update_lead_call_id_by_id,
+        update_lead_call_recording_url,
+    )
+
+    timer = DailyStartupTimer(
+        component="start_daily_session",
+        lead_id=lead_id,
+        started_at_epoch_ms=time.time() * 1000,
+    )
+    timer.mark("begin", recording=enable_recording)
+
     # Reject BEFORE creating any room/DB state: each live bot is its own OS
     # process holding dedicated Postgres/Redis connections and ~300MB RSS, so
     # an unbounded spike would exhaust shared infrastructure (Postgres
@@ -215,17 +244,22 @@ async def start_daily_session(
             f"BB_MAX_CONCURRENT_DAILY_BOTS={BB_MAX_CONCURRENT_DAILY_BOTS}); "
             "rejecting new voice session"
         )
+    timer.mark("capacity_checked", live_bots=live_bots)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
+    timer.session_id = session_id
+    timer.mark("session_id_created")
 
     # Create Daily room on-demand
     async with create_aiohttp_session() as aiohttp_session:
+        timer.mark("aiohttp_session_created")
         daily_rest = DailyRESTHelper(
             daily_api_key=BREEZE_BUDDY_DAILY_API_KEY,
             daily_api_url=BREEZE_BUDDY_DAILY_API_URL,
             aiohttp_session=aiohttp_session,
         )
+        timer.mark("daily_rest_helper_created")
 
         # Create room with params. Cloud recording is opt-in per call so
         # widget voice attachments can skip it (no per-call recording
@@ -241,21 +275,40 @@ async def start_daily_session(
         )
         room = await daily_rest.create_room(room_params)
         room_url = room.url
+        timer.mark("daily_room_created", room_name=room.name)
 
-        # Create tokens
-        user_token = await daily_rest.get_token(room_url)
+        # Create tokens in parallel. The user token and bot token are
+        # independent once the room exists, so serial awaits add one avoidable
+        # network round trip to every Daily startup.
+        user_token_task = asyncio.create_task(daily_rest.get_token(room_url))
         if enable_recording:
-            bot_token = await daily_rest.get_token(
-                room_url,
-                expiry_time=3600,
-                params=DailyMeetingTokenParams(
-                    properties=DailyMeetingTokenProperties(
-                        start_cloud_recording=True,
-                    )
+            bot_token_task = asyncio.create_task(
+                daily_rest.get_token(
+                    room_url,
+                    expiry_time=3600,
+                    params=DailyMeetingTokenParams(
+                        properties=DailyMeetingTokenProperties(
+                            start_cloud_recording=True,
+                        )
+                    ),
                 ),
             )
         else:
-            bot_token = await daily_rest.get_token(room_url, expiry_time=3600)
+            bot_token_task = asyncio.create_task(
+                daily_rest.get_token(room_url, expiry_time=3600)
+            )
+        timer.mark("daily_token_requests_created")
+        try:
+            user_token, bot_token = await asyncio.gather(
+                user_token_task, bot_token_task
+            )
+        except Exception:
+            for token_task in (user_token_task, bot_token_task):
+                if not token_task.done():
+                    token_task.cancel()
+            await asyncio.gather(user_token_task, bot_token_task, return_exceptions=True)
+            raise
+        timer.mark("daily_tokens_created", parallel=True)
 
     # Store room name as call_id for on-demand recording retrieval.
     # Always set call_id (it's the call SID equivalent for Daily mode
@@ -263,6 +316,7 @@ async def start_daily_session(
     # recording_url sentinel when recording is actually enabled — a
     # widget call with no recording shouldn't show a player.
     updated_lead = await update_lead_call_id_by_id(lead_id, room.name)
+    timer.mark("lead_call_id_updated", updated=bool(updated_lead))
     if not updated_lead:
         logger.warning(
             f"Failed to set call_id for lead {lead_id} — completion lookup may not work"
@@ -271,6 +325,7 @@ async def start_daily_session(
         # Sentinel recording_url so frontend shows the recording player
         # (depends on call_id being set above).
         recording_lead = await update_lead_call_recording_url(room.name, "daily")
+        timer.mark("recording_url_updated", updated=bool(recording_lead))
         if not recording_lead:
             logger.warning(
                 f"Failed to set recording_url for lead {lead_id} — frontend may not show recording player"
@@ -281,6 +336,7 @@ async def start_daily_session(
         # previous run that set ``recording_url="daily"`` would otherwise
         # leave a player visible on this non-recorded session.
         cleared_lead = await update_lead_call_recording_url(room.name, "")
+        timer.mark("recording_url_cleared", updated=bool(cleared_lead))
         if not cleared_lead:
             logger.warning(
                 f"Failed to clear stale recording_url for lead {lead_id} — "
@@ -299,8 +355,10 @@ async def start_daily_session(
         body={
             "lead_id": lead_id,
             "session_id": session_id,
+            STARTED_AT_EPOCH_MS_KEY: timer.started_at_epoch_ms,
         },
     )
+    timer.mark("runner_args_created")
 
     # Start the bot in its own OS process (see _launch_daily_bot). Unlike the
     # old create_task launch this CAN fail (fork error, child dying before
@@ -311,6 +369,7 @@ async def start_daily_session(
     # never exist. call_id is left in place — a retry overwrites it.
     try:
         await _launch_daily_bot(runner_args)
+        timer.mark("bot_launch_returned")
     except Exception:
         if enable_recording:
             try:
@@ -325,6 +384,7 @@ async def start_daily_session(
     logger.info(
         f"Successfully started Breeze Buddy Daily bot for lead_id: {lead_id}, session: {session_id}"
     )
+    timer.mark("response_ready")
 
     # Return room credentials to caller
     return {

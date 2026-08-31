@@ -4,18 +4,16 @@ Handler Context
 Provides context and state access for handler functions.
 """
 
+from __future__ import annotations
+
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional
-
-from pipecat.frames.frames import (
-    MixerEnableFrame,
-    MixerUpdateSettingsFrame,
-    TTSSpeakFrame,
-)
-from pipecat_flows import NodeConfig
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from app.core.logger import logger
+
+if TYPE_CHECKING:
+    from pipecat_flows import NodeConfig
 
 
 class TemplateContext:
@@ -118,6 +116,8 @@ class TemplateContext:
     async def queue_tts_filler(self, phrase: str) -> None:
         """Queue a filler phrase for TTS synthesis. Non-blocking."""
         if self.task:
+            from pipecat.frames.frames import TTSSpeakFrame
+
             await self.task.queue_frame(TTSSpeakFrame(text=phrase))
 
     async def manage_audio_mixer(
@@ -134,6 +134,8 @@ class TemplateContext:
         """
         if not self.task:
             return
+        from pipecat.frames.frames import MixerEnableFrame, MixerUpdateSettingsFrame
+
         if settings:
             await self.task.queue_frame(MixerUpdateSettingsFrame(settings=settings))
         await self.task.queue_frame(MixerEnableFrame(enable=enable))

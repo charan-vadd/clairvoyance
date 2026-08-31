@@ -13,7 +13,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends
 
 from app.api.security.breeze_buddy.rbac_token import get_current_user_with_rbac
-from app.schemas import BreezeBuddyDailyConnectRequest, UserInfo
+from app.schemas.breeze_buddy.auth import UserInfo
+from app.schemas.breeze_buddy.connection import BreezeBuddyDailyConnectRequest
 
 from .handlers import breeze_buddy_daily_connect_handler
 
